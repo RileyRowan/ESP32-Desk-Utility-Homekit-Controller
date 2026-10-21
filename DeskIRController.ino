@@ -1,42 +1,41 @@
 /*
-  ESP32 HomeSpan + IR Touch Controller + WS2812B Monitor Light
-  ESP32 Core: 2.0.14
-  HomeSpan: 1.9.1
-  IR Library: IRremoteESP8266 2.9.0
-  LEDs: HomeSpan built-in Pixel class (RMT-driven, coexists with WiFi/HomeKit)
+  ESP32 Desk Utility HomeKit Controller
+  ------------------------------------------------------------------------------
+  HomeKit bridge (HomeSpan) for my desk: controls a Samsung TV over IR, drives a
+  WS2812B monitor backlight, and reads one capacitive touch pad.
 
-  HOMESPAN SERIAL MONITOR TERMINAL (115200 baud)
-    Type ? for command list
-    Type E to erase stored data
-    Type W to start wifi setup
-    Type @W to save the Monitor Light's current color as warm white
+  BUILD
+    Arduino IDE, ESP32 core 2.0.14, HomeSpan 1.9.1, IRremoteESP8266 2.9.0
+    LEDs use HomeSpan's built-in Pixel class (RMT driven, safe alongside WiFi)
 
-  WIFI
-    SSID:     [CONFIGURED IN HOMESPAN CLI]
-    Password: [CONFIGURED IN HOMESPAN CLI]
+  HARDWARE
+    GPIO18  TTP223B touch sensor
+    GPIO4   IR LED
+    GPIO5   WS2812B data. 12V strip, 114 LEDs wired 3 per IC = 38 pixels.
+            Strip has its own 12V supply, ground shared with the ESP32.
 
-  HOMEKIT
-    Default Setup Code: 466-37-726
+  SETUP (Serial Monitor, 115200 baud)
+    W     enter WiFi credentials
+    E     erase stored data (WiFi + HomeKit pairing)
+    ?     full HomeSpan command list
+    @W    save the Monitor Light's current color as the warm white (kept in flash)
+    HomeKit setup code: 466-37-726
 
-  FEATURES:
-  - HomeKit Bridge exposing:
-      - Desk Switch          (touch hold 1s = ON, hold 3s = OFF, HomeKit toggle also works)
-      - TV Power             (momentary HomeKit button -> sends Samsung POWER)
-      - Volume Up            (momentary HomeKit button -> sends Samsung VOL+)
-      - Volume Down          (momentary HomeKit button -> sends Samsung VOL-)
-      - Mode                 (momentary HomeKit button -> sends Samsung MODE)
-      - Monitor Light        (full color bulb: On/Brightness/Hue/Saturation -> all pixels)
-      - Chase Red            (effect switch - red drifts over the Monitor Light color)
-      - Chase Blue           (effect switch - blue drifts over the Monitor Light color)
-      - Color Cycle          (effect switch - rotating anchor wheel, ported from
-                              MonitorBacklight_HueChase_FastLED)
-      - Fireflies            (effect switch - random intensity swells over static warm)
-    Effect switches behave like radio buttons: enabling one disables the others;
-    disabling the active one returns to solid color. Brightness is a global dimmer
-    over every mode. ALL mode changes crossfade over FADE_MS (no snapping).
-    Turning the light on from off (any path: HomeKit, 4-tap, desk switch) always
-    resets to solid warm white at 50% brightness.
-  - Touch input (TTP223B on GPIO18)
+  HOMEKIT TILES
+    Desk Switch        ON:  light fades up warm, TV power IR sent 5s later
+                       OFF: light fades out (cancels the IR if not sent yet)
+    TV Power, Volume Up, Volume Down, Mode
+                       momentary buttons that send the Samsung IR code
+    Monitor Light      color bulb (on, brightness, hue, saturation) for the strip
+    Chase Red / Blue   red or blue wave drifting over the Monitor Light color
+    Color Cycle        red/green/blue wheel rotating around the monitor, 10s loop
+    Fireflies          warm base at 10%, random pixels swell up and back down
+
+    Effect tiles act like radio buttons; turning the active one off returns to
+    solid. Brightness dims every mode. Mode changes crossfade over FADE_MS.
+    Turning the light on from off (any path) resets to warm white at 50%.
+
+  TOUCH COMMANDS
 
       +-------------+------------------------------------------------------------+
       | Gesture     | Action                                                     |
@@ -50,11 +49,6 @@
       | Hold 3s     | Desk Switch OFF (light fades out)                          |
       +-------------+------------------------------------------------------------+
       Taps must land within 400ms of each other (TAP_WINDOW).
-  - Desk Switch ON -> non-blocking 5s delay -> send POWER IR (Samsung)
-  - Serial CLI: '@W' saves the Monitor Light's current color as the warm white
-    default (persisted to flash, reloaded at boot)
-
-  STRIP NOTE: 114 physical LEDs but wired 3-per-IC -> 38 addressable groups.
 */
 
 #include <Arduino.h>
@@ -84,7 +78,7 @@ enum LedMode {
   MODE_SOLID,        // single HomeKit-set color on all pixels
   MODE_CHASE_RED,    // red chases over the Monitor Light background color
   MODE_CHASE_BLUE,   // blue chases over the Monitor Light background color
-  MODE_ANCHOR,       // rotating anchor-color wheel (same as MonitorBacklight_HueChase_FastLED)
+  MODE_ANCHOR,       // rotating red/green/blue color wheel ("Color Cycle")
   MODE_FIREFLY,      // static warm white with random intensity swells
   MODE_COUNT
 };
@@ -96,10 +90,8 @@ const unsigned long FADE_MS   = 1500;   // crossfade length between modes
 const unsigned long FRAME_MS  = 33;     // ~30 fps
 const float POWER_FADE_STEP   = 0.033;  // master fade step per frame (~1s full on/off)
 
-// Warm white factory default (also the firefly base color): R=100%, G=35%, B=0%
-// The live values below can be overwritten at runtime with the '@W' serial
-// command (saves the Monitor Light's current color as the new warm white,
-// persisted to flash) and are reloaded from flash at boot.
+// Warm white factory default (R=100%, G=35%, B=0%), also the firefly color.
+// '@W' overwrites the live values below and saves them to flash; they reload at boot.
 const float WARM_HUE_DEFAULT = 21, WARM_SAT_DEFAULT = 100;
 
 float   warmHue = WARM_HUE_DEFAULT, warmSat = WARM_SAT_DEFAULT;
@@ -116,20 +108,18 @@ const uint8_t COL_BLUE[3] = {   0, 0, 255 };
 const float CHASE_SPEED = 0.8;      // radians/sec drift
 const float CHASE_WAVES = 1.0;      // waves along the strip
 
-// Anchor wheel (ported from MonitorBacklight_HueChase_FastLED): every pixel sits
-// on a circular 0..65535 color wheel through the anchors, rotating over time.
+// Color Cycle: every pixel sits on a circular 0..65535 wheel through the anchor
+// colors, and the wheel rotates over time.
 const uint8_t ANCHORS[3][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 } };  // red, green, blue
-// Full wheel = 65536 units; 65536/10s = ~6554 units/sec for a 10-second cycle
-const float ANCHOR_ROT_SPEED = -6554.0;
+const float ANCHOR_ROT_SPEED = -6554.0;   // 65536 units / 10s = one loop every 10s; sign = direction
 const float ANCHOR_GAMMA = 2.8;
 
 #define MAX_FIREFLIES 6
 const float FIREFLY_BASE = 0.10;    // dim warm base level; swells rise to 1.0 and dim back down
 
 // -------------------- STRIP COLOR ORDER --------------------
-// This strip's ICs latch channels in RBG order rather than standard WS2812 GRB,
-// so green/blue are swapped at the last moment before hitting the driver.
-// All code above this point still thinks in normal (r, g, b).
+// This strip's ICs take channels in RBG order, so green and blue are swapped
+// right before the driver. Everything else in the sketch works in normal RGB.
 Pixel::Color stripColor(uint8_t r, uint8_t g, uint8_t b) {
   return Pixel::Color().RGB(r, b, g);   // RBG profile: swap G and B
 }
@@ -153,10 +143,9 @@ void hsv2rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b) {
 }
 
 // -------------------- LED ENGINE --------------------
-// Renders the active mode every frame. On any mode change it keeps rendering the
-// previous mode too and crossfades between the two buffers over FADE_MS, so
-// cycling effects (from HomeKit or the touch sensor) never snaps abruptly.
-// Power on/off is a separate master-brightness ramp (~1s fade).
+// Renders the active mode every frame. After a mode change it also renders the
+// previous mode and crossfades the two over FADE_MS, so effects never snap.
+// Power on/off is a separate master brightness ramp (~1s fade).
 struct LedEngine {
 
   Pixel *pixel;
@@ -184,7 +173,7 @@ struct LedEngine {
   };
   Firefly flies[MAX_FIREFLIES];
 
-  uint8_t gammaT[256];   // gamma table for the anchor wheel (matches napplyGamma_video 2.8)
+  uint8_t gammaT[256];   // gamma 2.8 lookup for the Color Cycle wheel
 
   void begin() {
     pixel = new Pixel(LED_PIN);
@@ -218,17 +207,15 @@ struct LedEngine {
 
   // ---- per-mode renderers ----
 
-  // Brightness (val) is applied globally in tick() so it dims effects too --
-  // renderers all work at full value.
+  // Renderers work at full value; brightness (val) is applied in tick().
   void renderSolid(uint8_t buf[][3]) {
     uint8_t r, g, b;
     hsv2rgb(hue, sat, 100, &r, &g, &b);
     for (int i = 0; i < NUM_PIXELS; i++) { buf[i][0] = r; buf[i][1] = g; buf[i][2] = b; }
   }
 
-  // Chase color drifts over whatever background color the Monitor Light is set
-  // to. One sine wave around the loop: chase peak and pure background are 180
-  // degrees apart, both visible at once.
+  // Chase color drifts over the Monitor Light color. One sine wave around the
+  // loop puts the chase peak and the pure background 180 degrees apart.
   void renderChase(uint8_t buf[][3], const uint8_t *chase, float t) {
     uint8_t br, bg, bb;
     hsv2rgb(hue, sat, 100, &br, &bg, &bb);
@@ -240,9 +227,8 @@ struct LedEngine {
     }
   }
 
-  // Rotating anchor-color wheel, ported from MonitorBacklight_HueChase_FastLED:
   // pos(i) = offset + i * 65536 / NUM_PIXELS spreads the wheel evenly around the
-  // loop (including the wrap seam), colors lerped between anchors then gamma'd.
+  // loop, including the wrap seam. Colors blend between anchors, then gamma.
   void renderAnchor(uint8_t buf[][3], float t) {
     uint16_t offset = (uint16_t)(int32_t)(t * ANCHOR_ROT_SPEED);
     for (int i = 0; i < NUM_PIXELS; i++) {
@@ -379,13 +365,13 @@ struct DeskSceneSwitch : Service::Switch {
     power = new Characteristic::On(false);
   }
 
-  // Called automatically by HomeSpan when a HomeKit client toggles this switch
+  // HomeKit toggled the switch
   boolean update() override {
     applyState(power->getNewVal());
     return true;
   }
 
-  // Called automatically by HomeSpan every poll cycle - used for the non-blocking IR delay
+  // HomeSpan calls this every poll; handles the non-blocking 5s IR delay
   void loop() override {
     if (pendingIr && millis() >= irTime) {
       irsend.sendSAMSUNG(IR_POWER, 32);
@@ -394,13 +380,13 @@ struct DeskSceneSwitch : Service::Switch {
     }
   }
 
-  // Called by our own touch code (not by HomeSpan) to drive the switch from the touch sensor
+  // Touch sensor drives the switch; also updates the HomeKit tile
   void setFromTouch(bool state) {
-    power->setVal(state, true);   // update HomeKit's view + notify any connected clients
+    power->setVal(state, true);
     applyState(state);
   }
 
-  // Shared logic for "switch changed to this state", regardless of who triggered it
+  // Shared by HomeKit and touch
   void applyState(bool state) {
     Serial.print("Desk Switch -> ");
     Serial.println(state ? "ON" : "OFF");
@@ -427,9 +413,8 @@ struct DeskSceneSwitch : Service::Switch {
 DeskSceneSwitch *deskSwitch;
 
 // -------------------- HOMEKIT: MOMENTARY REMOTE BUTTON --------------------
-// Represents a single remote key (Power / Vol+ / Vol- / Mode) as a HomeKit switch
-// that auto-resets itself back to OFF shortly after being turned on, so it behaves
-// like a momentary "button" from the Home app / Siri.
+// One remote key as a HomeKit switch that turns itself back off after 500ms,
+// so it acts like a button in the Home app and Siri.
 struct RemoteButton : Service::Switch {
 
   SpanCharacteristic *power;
@@ -498,9 +483,8 @@ struct MonitorLight : Service::LightBulb {
   boolean update() override {
 
     if (power->updated()) {
-      // Turning on from off always comes up in warm white at 50%. (If this
-      // same HomeKit request also carries a color/brightness, the blocks
-      // below apply it on top of the reset.)
+      // Turning on from off comes up warm white at 50%. If the same request
+      // also carries a color or brightness (a scene), it's applied below.
       if (power->getNewVal() && !leds.isOn())
         resetToWarmDefaults();
       leds.setPower(power->getNewVal());
@@ -508,13 +492,12 @@ struct MonitorLight : Service::LightBulb {
       Serial.println(power->getNewVal() ? "ON" : "OFF");
     }
 
-    // Brightness is a global dimmer -- adjusting it does NOT kick out of an effect
+    // Brightness dims every mode; it doesn't stop a running effect
     if (level->updated())
       leds.val = level->getNewVal<float>();
 
-    // Changing the color updates the solid/background color. If an effect is
-    // running it stays running (the chases use this as their background); only
-    // update the mode to solid when no effect is active.
+    // Color sets the solid color, which is also the chase background.
+    // A running effect keeps running.
     if (hue->updated())
       leds.hue = hue->getNewVal<float>();
     if (saturation->updated())
@@ -544,13 +527,12 @@ struct EffectSwitch : Service::Switch {
       Serial.print("Effect via HomeKit: ");
       Serial.println(label);
 
-      // Starting an effect while the light is off first resets the background
-      // color/brightness to warm white at 50%, then applies the effect
+      // From off: reset to warm white at 50% first, then start the effect
       if (!leds.isOn())
         resetToWarmDefaults();
 
       leds.setMode(effectMode);
-      leds.setPower(true);          // starting an effect implies the light is on
+      leds.setPower(true);
       setLightTile(true);
       syncEffectTiles(effectMode);  // turn the other effect tiles off
     } else if (leds.mode == effectMode) {
@@ -579,9 +561,8 @@ void setLightTile(bool on) {
     monitorLight->power->setVal(on, true);
 }
 
-// Reset to the saved warm white at 50% brightness in solid mode, and reflect
-// it on the HomeKit tiles. Called whenever the light turns on from off, so the
-// light always comes up warm regardless of what it was doing when it went off.
+// Solid warm white at 50%, mirrored to the HomeKit tiles. Called whenever the
+// light turns on from off, whatever it was doing before.
 void resetToWarmDefaults() {
   leds.hue = warmHue;
   leds.sat = warmSat;
@@ -607,9 +588,8 @@ void loadWarmWhite() {
                 warmHue, warmSat, warmR, warmG, warmB);
 }
 
-// Serial CLI command (type '@W' in the Serial Monitor): saves the Monitor
-// Light's CURRENT color as the new warm white and persists it to flash.
-// Set the color you want via the Home app color wheel first, then @W.
+// '@W' in the Serial Monitor: set the color in the Home app first, then type @W
+// to save it as the warm white.
 void saveWarmWhite(const char *buf) {
   warmHue = leds.hue;
   warmSat = leds.sat;
@@ -640,8 +620,7 @@ void setup() {
   irsend.begin();
   leds.begin();
 
-  // Restore saved warm white (falls back to defaults on first boot) BEFORE the
-  // accessories are built, so the Monitor Light tile starts on the right color
+  // Load warm white before building accessories so the light tile starts on it
   loadWarmWhite();
   leds.hue = warmHue;
   leds.sat = warmSat;
@@ -714,7 +693,6 @@ void setup() {
       new Characteristic::Name("Fireflies");
     effectSwitches[MODE_FIREFLY] = new EffectSwitch("Fireflies", MODE_FIREFLY);
 
-  // Custom serial CLI command: '@W' saves current color as warm white
   new SpanUserCommand('W', " - save the Monitor Light's current color as warm white (persists)", saveWarmWhite);
 
   Serial.println("System Ready");
@@ -777,10 +755,8 @@ void loop() {
   if (touched && touchActive) {
     unsigned long held = millis() - touchStart;
 
-    // Guards: only act when the state would actually change. Without them, a
-    // 3s hold-to-off passes through the 1s mark and re-fires "ON" on an
-    // already-on desk, re-arming the 5s power IR (which would toggle the
-    // monitor off if the hold were released between 1s and 3s).
+    // Only act if the state would change. A 3s hold-to-off passes the 1s mark;
+    // without the guard it would re-fire ON and re-arm the TV power IR.
     if (!hold1Fired && held >= HOLD1_MS) {
       hold1Fired = true;
       if (!deskSwitch->power->getVal()) {
