@@ -16,11 +16,11 @@
     Password: [CONFIGURED IN HOMESPAN CLI]
 
   HOMEKIT
-    Setup Code: [USE DEFAULT OR CUSTOM - SET VIA HOMESPAN CLI]
+    Default Setup Code: 466-37-726
 
   FEATURES:
   - HomeKit Bridge exposing:
-      - Desk Switch          (touch hold 1s = ON, hold 2s = OFF, HomeKit toggle also works)
+      - Desk Switch          (touch hold 1s = ON, hold 3s = OFF, HomeKit toggle also works)
       - TV Power             (momentary HomeKit button -> sends Samsung POWER)
       - Volume Up            (momentary HomeKit button -> sends Samsung VOL+)
       - Volume Down          (momentary HomeKit button -> sends Samsung VOL-)
