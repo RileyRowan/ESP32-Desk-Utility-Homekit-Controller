@@ -37,13 +37,19 @@
     Turning the light on from off (any path: HomeKit, 4-tap, desk switch) always
     resets to solid warm white at 50% brightness.
   - Touch input (TTP223B on GPIO18)
-      - short tap x1 -> Volume Up
-      - short tap x2 -> Volume Down
-      - short tap x3 -> Mode
-      - short tap x4 -> toggle Monitor Light on/off
-      - short tap x5 -> cycle light mode: Solid -> Chase Red -> Chase Blue -> Cycle -> Fireflies
-      - hold >=1s     -> Desk Switch ON  (also fades Monitor Light up in warm white)
-      - hold >=3s     -> Desk Switch OFF (also fades Monitor Light out)
+
+      +-------------+------------------------------------------------------------+
+      | Gesture     | Action                                                     |
+      +-------------+------------------------------------------------------------+
+      | 1 tap       | TV Volume Up                                               |
+      | 2 taps      | TV Volume Down                                             |
+      | 3 taps      | TV Mode                                                    |
+      | 4 taps      | Monitor Light on/off (on = warm white @ 50%)               |
+      | 5 taps      | Next effect: Solid>Chase Red>Chase Blue>Cycle>Fireflies    |
+      | Hold 1s     | Desk Switch ON (light fades up warm, TV power IR in 5s)    |
+      | Hold 3s     | Desk Switch OFF (light fades out)                          |
+      +-------------+------------------------------------------------------------+
+      Taps must land within 400ms of each other (TAP_WINDOW).
   - Desk Switch ON -> non-blocking 5s delay -> send POWER IR (Samsung)
   - Serial CLI: '@W' saves the Monitor Light's current color as the warm white
     default (persisted to flash, reloaded at boot)
