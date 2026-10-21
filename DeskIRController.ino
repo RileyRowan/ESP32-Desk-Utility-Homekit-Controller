@@ -30,6 +30,8 @@
     Chase Red / Blue   red or blue wave drifting over the Monitor Light color
     Color Cycle        red/green/blue wheel rotating around the monitor, 10s loop
     Fireflies          warm base at 10%, random pixels swell up and back down
+    Desk Mode Trigger  programmable button (no tile). In its settings, set
+                       Single Press -> your Desk Mode scene. Needs a home hub.
 
     Effect tiles act like radio buttons; turning the active one off returns to
     solid. Brightness dims every mode. Mode changes crossfade over FADE_MS.
@@ -47,8 +49,10 @@
       | 5 taps      | Next effect: Solid>Chase Red>Chase Blue>Cycle>Fireflies    |
       | Hold 1s     | Desk Switch ON (light fades up warm, TV power IR in 5s)    |
       | Hold 3s     | Desk Switch OFF (light fades out)                          |
+      | Tap + hold  | Desk Mode scene (tap, then hold 1.5s on the next press)    |
       +-------------+------------------------------------------------------------+
-      Taps must land within 400ms of each other (TAP_WINDOW).
+      Taps must land within 400ms of each other (TAP_WINDOW). Letting go of the
+      tap + hold before 1.5s cancels it.
 */
 
 #include <Arduino.h>
@@ -345,8 +349,12 @@ unsigned long touchStart = 0;
 bool hold1Fired = false;
 bool hold2Fired = false;
 
-const unsigned long HOLD1_MS = 1000;   // hold to turn desk switch ON
-const unsigned long HOLD2_MS = 3000;   // hold to turn desk switch OFF
+bool tapHold = false;        // this press started right after a tap (tap + hold gesture)
+bool sceneFired = false;
+
+const unsigned long HOLD1_MS = 1000;      // hold to turn desk switch ON
+const unsigned long HOLD2_MS = 3000;      // hold to turn desk switch OFF
+const unsigned long TAP_HOLD_MS = 1500;   // tap, then hold this long -> Desk Mode scene
 
 // -------------------- TAP STATE --------------------
 int tapCount = 0;
@@ -546,6 +554,27 @@ struct EffectSwitch : Service::Switch {
 
 EffectSwitch *effectSwitches[MODE_COUNT];   // indexed by LedMode; MODE_SOLID entry stays null
 
+// -------------------- HOMEKIT: SCENE BUTTON --------------------
+// Accessories can't run scenes themselves, but HomeKit lets you assign a scene
+// to a programmable button's press. In the Home app, open this accessory's
+// settings and set Single Press -> your Desk Mode scene. Needs a home hub.
+struct SceneButton : Service::StatelessProgrammableSwitch {
+
+  SpanCharacteristic *event;
+
+  SceneButton() : Service::StatelessProgrammableSwitch() {
+    event = new Characteristic::ProgrammableSwitchEvent();
+    // only offer "Single Press" in the Home app
+    event->setValidValues(1, Characteristic::ProgrammableSwitchEvent::SINGLE_PRESS);
+  }
+
+  void press() {
+    event->setVal(Characteristic::ProgrammableSwitchEvent::SINGLE_PRESS);
+  }
+};
+
+SceneButton *deskModeButton;
+
 // Reflect the currently-active mode onto the HomeKit effect tiles
 void syncEffectTiles(LedMode activeMode) {
   for (int m = 0; m < MODE_COUNT; m++) {
@@ -693,16 +722,24 @@ void setup() {
       new Characteristic::Name("Fireflies");
     effectSwitches[MODE_FIREFLY] = new EffectSwitch("Fireflies", MODE_FIREFLY);
 
+  // Keep new accessories at the end so existing ones keep their HomeKit IDs
+  new SpanAccessory();                              // Desk Mode scene button
+    new Service::AccessoryInformation();
+      new Characteristic::Identify();
+      new Characteristic::Name("Desk Mode Trigger");
+    deskModeButton = new SceneButton();
+
   new SpanUserCommand('W', " - save the Monitor Light's current color as warm white (persists)", saveWarmWhite);
 
   Serial.println("System Ready");
-  Serial.println("Tap: 1=Vol+, 2=Vol-, 3=Mode, 4=Light On/Off, 5=Cycle Light | Hold 1s=Desk ON, Hold 3s=Desk OFF");
+  Serial.println("Tap: 1=Vol+, 2=Vol-, 3=Mode, 4=Light On/Off, 5=Cycle Light | Hold 1s=Desk ON, Hold 3s=Desk OFF | Tap+Hold 1.5s=Desk Mode");
 }
 
 // -------------------- TAP PROCESSOR --------------------
 void processTaps() {
 
   if (tapCount == 0) return;
+  if (touchActive) return;   // a press is in progress; it may extend the sequence
   if (millis() - lastTapTime < TAP_WINDOW) return;
 
   if (tapCount == 1) {
@@ -749,27 +786,42 @@ void loop() {
     touchStart = millis();
     hold1Fired = false;
     hold2Fired = false;
+    sceneFired = false;
+    tapHold = (tapCount == 1);   // second press within TAP_WINDOW of a single tap
   }
 
   // WHILE HELD -> check hold thresholds
   if (touched && touchActive) {
     unsigned long held = millis() - touchStart;
 
-    // Only act if the state would change. A 3s hold-to-off passes the 1s mark;
-    // without the guard it would re-fire ON and re-arm the TV power IR.
-    if (!hold1Fired && held >= HOLD1_MS) {
-      hold1Fired = true;
-      if (!deskSwitch->power->getVal()) {
-        Serial.println("Hold 1s -> Desk Switch ON");
-        deskSwitch->setFromTouch(true);
+    // Tap + hold: Desk Mode scene. The desk holds below are skipped for this press.
+    if (tapHold) {
+      if (!sceneFired && held >= TAP_HOLD_MS) {
+        sceneFired = true;
+        tapCount = 0;
+        Serial.println("Tap + Hold 1.5s -> Desk Mode scene");
+        deskModeButton->press();
       }
     }
 
-    if (!hold2Fired && held >= HOLD2_MS) {
-      hold2Fired = true;
-      if (deskSwitch->power->getVal()) {
-        Serial.println("Hold 3s -> Desk Switch OFF");
-        deskSwitch->setFromTouch(false);
+    // Plain holds only start a gesture fresh, not mid tap sequence.
+    // Only act if the state would change. A 3s hold-to-off passes the 1s mark;
+    // without the guard it would re-fire ON and re-arm the TV power IR.
+    else if (tapCount == 0) {
+      if (!hold1Fired && held >= HOLD1_MS) {
+        hold1Fired = true;
+        if (!deskSwitch->power->getVal()) {
+          Serial.println("Hold 1s -> Desk Switch ON");
+          deskSwitch->setFromTouch(true);
+        }
+      }
+
+      if (!hold2Fired && held >= HOLD2_MS) {
+        hold2Fired = true;
+        if (deskSwitch->power->getVal()) {
+          Serial.println("Hold 3s -> Desk Switch OFF");
+          deskSwitch->setFromTouch(false);
+        }
       }
     }
   }
@@ -777,13 +829,17 @@ void loop() {
   // TOUCH END
   if (!touched && touchActive) {
     touchActive = false;
+    unsigned long held = millis() - touchStart;
 
-    // Only count as a tap if no hold gesture fired during this press
-    if (!hold1Fired && !hold2Fired) {
+    // Short press = tap. A long press that fired nothing (e.g. a tap + hold
+    // let go before 1.5s) cancels the whole sequence instead.
+    if (!hold1Fired && !hold2Fired && !sceneFired && held < HOLD1_MS) {
       tapCount++;
       lastTapTime = millis();
       Serial.print("Tap registered: ");
       Serial.println(tapCount);
+    } else {
+      tapCount = 0;
     }
   }
 

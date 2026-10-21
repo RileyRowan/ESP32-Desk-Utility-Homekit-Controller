@@ -13,8 +13,9 @@ An ESP32 that runs my desk. It's a HomeKit bridge built on [HomeSpan](https://gi
 | 5 taps | Next light effect: Solid → Chase Red → Chase Blue → Color Cycle → Fireflies |
 | Hold 1 s | Desk Switch ON: light fades up warm, TV power sent after 5 s |
 | Hold 3 s | Desk Switch OFF: light fades out |
+| Tap, then hold 1.5 s | Runs the Desk Mode scene |
 
-Taps must land within 400 ms of each other.
+Taps must land within 400 ms of each other. Letting go of the tap + hold before 1.5 s cancels it.
 
 ## HomeKit Accessories
 
@@ -26,8 +27,11 @@ Taps must land within 400 ms of each other.
 | Chase Red / Chase Blue | Red or blue wave drifting over the Monitor Light color |
 | Color Cycle | Red/green/blue wheel rotating around the monitor, 10 s per loop |
 | Fireflies | Warm base at 10% with random pixels swelling up and back down |
+| Desk Mode Trigger | Programmable button (no tile) fired by the tap + hold gesture |
 
 The effect tiles work like radio buttons: turning one on turns the others off. Every mode change crossfades instead of snapping.
+
+**Desk Mode scene:** an accessory can't run a HomeKit scene directly, so the tap + hold gesture presses the Desk Mode Trigger button instead. In the Home app, open the Desk Mode Trigger accessory's settings and set **Single Press** to your Desk Mode scene. This needs a home hub (HomePod or Apple TV).
 
 ## Hardware
 
