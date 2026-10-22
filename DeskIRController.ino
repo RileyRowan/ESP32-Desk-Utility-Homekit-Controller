@@ -7,6 +7,12 @@
   BUILD
     Arduino IDE, ESP32 core 2.0.14, HomeSpan 1.9.1, IRremoteESP8266 2.9.0
     LEDs use HomeSpan's built-in Pixel class (RMT driven, safe alongside WiFi)
+    Tools menu:
+      Board             ESP32 Dev Module
+      Partition Scheme  Huge APP (3MB No OTA/1MB SPIFFS) - sketch is ~1.26MB,
+                        nearly fills the Default scheme
+      Upload Speed      115200 - this board's CH340 USB chip often fails at
+                        921600 ("Invalid head of packet")
 
   HARDWARE
     GPIO18  TTP223B touch sensor

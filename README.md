@@ -50,11 +50,20 @@ The strip runs from its own 12 V supply and shares ground with the ESP32.
 - HomeSpan **1.9.1** (its built-in `Pixel` class drives the LEDs)
 - IRremoteESP8266 **2.9.0**
 
+Board settings (Tools menu):
+
+| Setting | Value |
+|---|---|
+| Board | ESP32 Dev Module |
+| Partition Scheme | **Huge APP (3MB No OTA/1MB SPIFFS)**. The sketch is about 1.26 MB, which nearly fills the Default scheme |
+| Upload Speed | **115200**. The board's CH340 USB chip often fails at 921600 with "Invalid head of packet" |
+
 ## Setup
 
-1. Flash `DeskIRController.ino`.
+1. Flash `DeskIRController.ino`. If the upload says the port doesn't exist, re-pick it under Tools → Port; the name changes with the USB socket.
 2. Open the Serial Monitor at 115200 baud and type `W` to enter WiFi credentials.
 3. Add the bridge in the Home app with setup code **466-37-726**.
+4. In the Home app, open the **Desk Mode Trigger** accessory's settings and set **Single Press** to your Desk Mode scene.
 
 ## Serial Commands
 
